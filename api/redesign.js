@@ -42,6 +42,7 @@ export default async function handler(req, res) {
     res.status(500).json({ error: "JWT sign failed", detail: e.message });
     return;
   }
+
   // 2. Lấy access_token từ Google
   let access_token;
   try {
@@ -60,27 +61,44 @@ export default async function handler(req, res) {
     res.status(500).json({ error: "Google auth failed", detail: e.message });
     return;
   }
-  // 3. Build request gọi model Imagen 4
+
+  // 3. Build request gọi model
   const project = serviceAcc.project_id;
   const location = "us-central1";
-  const publisherModel =
-    model === "imagen-4-ultra"
+  let publisherModel, apiUrl, body;
+
+  if (model === "gemini-1.5-flash" || model === "gemini-flash") {
+    publisherModel = "publishers/google/models/gemini-1.5-flash-001";
+    apiUrl = `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/${publisherModel}:generateContent`;
+
+    body = {
+      contents: [{
+        role: "user",
+        parts: [{ text: prompt }]
+      }],
+      generationConfig: {
+        sampleCount: 1
+      }
+    };
+  } else {
+    publisherModel = (model === "imagen-4-ultra")
       ? "publishers/google/models/imagen-4-ultra"
       : "publishers/google/models/imagen-4";
-  const apiUrl = `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/${publisherModel}:predict`;
+    apiUrl = `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/${publisherModel}:predict`;
 
-  const body = {
-    instances: [
-      {
-        prompt,
-        aspectRatio: aspect_ratio || "1:1"
+    body = {
+      instances: [
+        {
+          prompt,
+          aspectRatio: aspect_ratio || "1:1"
+        }
+      ],
+      parameters: {
+        sampleCount: 1,
+        resolution: analysis_resolution === "high" ? "HIGH" : "LOW"
       }
-    ],
-    parameters: {
-      sampleCount: 1,
-      resolution: analysis_resolution === "high" ? "HIGH" : "LOW"
-    }
-  };
+    };
+  }
 
   try {
     const resp = await fetch(apiUrl, {
@@ -92,14 +110,25 @@ export default async function handler(req, res) {
       body: JSON.stringify(body),
     });
     const result = await resp.json();
-    // Extract kết quả ảnh
-    const image_base64 = result?.predictions?.[0]?.bytesBase64Encoded;
-    if (!image_base64) {
-      res.status(200).json({ status: "fail", message: "No image generated", raw: result });
-      return;
+
+    if (model === "gemini-1.5-flash" || model === "gemini-flash") {
+      // Lấy ảnh từ Gemini response
+      const image_base64 = result?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (!image_base64) {
+        res.status(200).json({ status: "fail", message: "No image generated", raw: result });
+        return;
+      }
+      res.status(200).json({ status: "success", image_base64 });
+    } else {
+      // Lấy ảnh từ Imagen-4 response
+      const image_base64 = result?.predictions?.[0]?.bytesBase64Encoded;
+      if (!image_base64) {
+        res.status(200).json({ status: "fail", message: "No image generated", raw: result });
+        return;
+      }
+      res.status(200).json({ status: "success", image_base64 });
     }
-    res.status(200).json({ status: "success", image_base64 });
   } catch (e) {
-    res.status(500).json({ error: "Google Imagen API call failed", detail: e.message });
+    res.status(500).json({ error: "Google Imagen/Gemini API call failed", detail: e.message });
   }
 }
