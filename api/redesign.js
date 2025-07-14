@@ -8,11 +8,18 @@ export default async function handler(req, res) {
     res.status(405).json({ error: 'Only POST allowed' });
     return;
   }
+
   const { prompt, model, aspect_ratio, analysis_resolution } = req.body || {};
 
+  // Chỉ cho phép gọi Gemini (ví dụ gemini-1.5-flash)
+  if (!prompt || !model || !model.toLowerCase().startsWith("gemini")) {
+    res.status(400).json({ error: "Missing prompt, model, hoặc model không phải Gemini!" });
+    return;
+  }
+
   const keyJSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (!prompt || !keyJSON) {
-    res.status(400).json({ error: 'Missing prompt or GOOGLE_SERVICE_ACCOUNT_JSON' });
+  if (!keyJSON) {
+    res.status(500).json({ error: "Missing GOOGLE_SERVICE_ACCOUNT_JSON env" });
     return;
   }
 
@@ -26,7 +33,7 @@ export default async function handler(req, res) {
 
   // 1. Tạo JWT access_token
   const iat = Math.floor(Date.now() / 1000);
-  const exp = iat + 60 * 60; // 1h
+  const exp = iat + 60 * 60;
   const payload = {
     iss: serviceAcc.client_email,
     sub: serviceAcc.client_email,
@@ -35,6 +42,7 @@ export default async function handler(req, res) {
     iat,
     exp,
   };
+
   let token;
   try {
     token = jwt.sign(payload, serviceAcc.private_key, { algorithm: "RS256" });
@@ -62,43 +70,25 @@ export default async function handler(req, res) {
     return;
   }
 
-  // 3. Build request gọi model
+  // 3. Build request Gemini
   const project = serviceAcc.project_id;
   const location = "us-central1";
-  let publisherModel, apiUrl, body;
+  // Chỉ chạy Gemini 1.5 Flash
+  const publisherModel = "publishers/google/models/gemini-1.5-flash-001";
+  const apiUrl = `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/${publisherModel}:generateContent`;
 
-  if (model === "gemini-1.5-flash" || model === "gemini-flash") {
-    publisherModel = "publishers/google/models/gemini-1.5-flash-001";
-    apiUrl = `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/${publisherModel}:generateContent`;
-
-    body = {
-      contents: [{
+  const body = {
+    contents: [
+      {
         role: "user",
         parts: [{ text: prompt }]
-      }],
-      generationConfig: {
-        sampleCount: 1
       }
-    };
-  } else {
-    publisherModel = (model === "imagen-4-ultra")
-      ? "publishers/google/models/imagen-4-ultra"
-      : "publishers/google/models/imagen-4";
-    apiUrl = `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/${publisherModel}:predict`;
-
-    body = {
-      instances: [
-        {
-          prompt,
-          aspectRatio: aspect_ratio || "1:1"
-        }
-      ],
-      parameters: {
-        sampleCount: 1,
-        resolution: analysis_resolution === "high" ? "HIGH" : "LOW"
-      }
-    };
-  }
+    ],
+    generationConfig: {
+      temperature: 1, // hoặc sửa theo ý bạn
+      // topP, topK, maxOutputTokens, v.v. nếu muốn
+    }
+  };
 
   try {
     const resp = await fetch(apiUrl, {
@@ -111,24 +101,14 @@ export default async function handler(req, res) {
     });
     const result = await resp.json();
 
-    if (model === "gemini-1.5-flash" || model === "gemini-flash") {
-      // Lấy ảnh từ Gemini response
-      const image_base64 = result?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (!image_base64) {
-        res.status(200).json({ status: "fail", message: "No image generated", raw: result });
-        return;
-      }
-      res.status(200).json({ status: "success", image_base64 });
-    } else {
-      // Lấy ảnh từ Imagen-4 response
-      const image_base64 = result?.predictions?.[0]?.bytesBase64Encoded;
-      if (!image_base64) {
-        res.status(200).json({ status: "fail", message: "No image generated", raw: result });
-        return;
-      }
-      res.status(200).json({ status: "success", image_base64 });
+    // Extract kết quả từ Gemini (tùy output, mẫu với text thôi)
+    const content = result?.candidates?.[0]?.content?.parts?.[0]?.text || null;
+    if (!content) {
+      res.status(200).json({ status: "fail", message: "No content generated", raw: result });
+      return;
     }
+    res.status(200).json({ status: "success", content });
   } catch (e) {
-    res.status(500).json({ error: "Google Imagen/Gemini API call failed", detail: e.message });
+    res.status(500).json({ error: "Gemini API call failed", detail: e.message });
   }
 }
